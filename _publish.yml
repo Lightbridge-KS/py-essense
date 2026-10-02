@@ -1,0 +1,4 @@
+- source: project
+  netlify:
+    - id: 7c5674d6-6c06-4f35-bc3f-b0e96e1bfa4c
+      url: https://py-essense-lightbridge.netlify.app
