@@ -1,0 +1,22 @@
+project:
+  type: book
+
+book:
+  title: "Python Essence"
+  author: "Kittipos Sirivongrungson"
+  date: today
+  repo-url: https://github.com/Lightbridge-KS/py-essense
+  site-url: https://py-essense-lightbridge.netlify.app
+  chapters:
+    - index.qmd
+
+format:
+  html:
+    theme:
+      light:
+        - cosmo
+      dark:
+        - darkly
+    toc-depth: 4
+
+freeze: auto
