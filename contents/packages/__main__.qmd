@@ -1,0 +1,65 @@
+---
+title: "`__main__.py`"
+---
+
+`main.py` is just a naming convention with no special meaning to Python, while `__main__.py` is a special filename that Python looks for when you run a **package or directory** as a program.
+
+## `main.py`: convention only
+
+Python treats `main.py` like any other file. People name their entry script `main.py` so readers know where to start. You could call it `app.py` or `run.py` and nothing would change.
+
+```zsh
+python main.py      # runs it like any script
+```
+
+## `__main__.py`: the entry point of a package
+
+When you tell Python to run a *package* (a folder) instead of a file, it looks for `__main__.py` inside it and runs that file.
+
+```
+myapp/
+├── __init__.py      ← runs on import (package setup)
+├── __main__.py      ← runs on `python -m myapp`
+└── core.py
+```
+
+```zsh
+python -m myapp       # runs myapp/__main__.py
+python myapp/         # also works on a directory
+python myapp.zip      # and on a zip archive
+```
+
+This is why `python -m pip`, `python -m venv`, and `python -m http.server` work. Each of those packages has a `__main__.py`.
+
+## How it connects to `if __name__ == "__main__":`
+
+Every module has a `__name__` variable. Its value depends on how the module was loaded:
+
+```
+How the file is loaded             __name__ value
+─────────────────────────────────  ─────────────────
+python core.py  (run directly)     "__main__"
+import core     (imported)         "core"
+python -m myapp → __main__.py      "__main__"
+```
+
+That's why this guard lets one file work both as a library and as a script:
+
+```python
+# core.py
+def greet(name: str) -> str:
+    return f"Hello, {name}"
+
+if __name__ == "__main__":     # only true when run directly
+    print(greet("LB"))
+```
+
+A typical clean `__main__.py` stays thin and delegates to the real code:
+
+```python
+# myapp/__main__.py
+from myapp.cli import main
+
+if __name__ == "__main__":
+    main()
+```

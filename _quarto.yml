@@ -13,6 +13,10 @@ book:
       chapters: 
         - text: Protocol vs ABC
           href: "contents/oop/protocols-vs-abc.qmd"
+    - part: Packages
+      chapters: 
+        - text: "__main__.py"
+          href: "contents/packages/__main__.qmd"
 
 format:
   html:
