@@ -13,6 +13,10 @@ book:
       chapters: 
         - text: Protocol vs ABC
           href: "contents/oop/protocols-vs-abc.qmd"
+    - part: Tests
+      chapters: 
+        - text: Pytest Basics
+          href: "contents/tests/pytests-basic.qmd"
     - part: Packages
       chapters: 
         - text: "__main__.py"

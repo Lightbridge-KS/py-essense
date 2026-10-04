@@ -1,0 +1,327 @@
+---
+title: "Pytest - Basics"
+---
+
+## Why pytest
+
+The standard library ships `unittest` (a JUnit port — classes, `self.assertEqual`, lots of ceremony). pytest keeps the same runner contract but lets you write tests as plain functions with plain `assert`. It's the de facto standard.
+
+```
+src-layout project
+.
+├── pyproject.toml
+├── src/
+│   └── mypkg/
+│       ├── __init__.py
+│       └── stats.py
+└── tests/
+    ├── conftest.py          ← shared fixtures, auto-discovered
+    ├── test_stats.py
+    └── test_io.py
+```
+
+Install: `pip install pytest`. Run: `pytest` from the project root.
+
+## Discovery rules
+
+pytest collects by naming convention. Get these wrong and your tests silently don't run:
+
+```
+files      test_*.py   or   *_test.py
+functions  test_*
+classes    Test*       (no __init__ method)
+methods    test_*
+```
+
+## The core: plain `assert`
+
+```python
+# tests/test_stats.py
+from mypkg.stats import mean
+
+def test_mean_of_integers():
+    assert mean([1, 2, 3]) == 2
+```
+
+pytest rewrites the bytecode of your assert statements so failures show the intermediate values:
+
+```
+E       assert 2.5 == 2
+E        +  where 2.5 = mean([1, 2, 3, 4])
+```
+
+That rewriting is why you never need `assertEqual`, `assertIn`, `assertGreater` — one keyword covers all of them.
+
+For floats, don't compare exactly:
+
+```python
+import pytest
+
+def test_mean_float():
+    assert mean([0.1, 0.2]) == pytest.approx(0.15)
+    assert mean([0.1, 0.2]) == pytest.approx(0.15, rel=1e-6)
+```
+
+## Testing that something raises
+
+```python
+def test_mean_rejects_empty():
+    with pytest.raises(ValueError, match="empty"):
+        mean([])
+```
+
+`match` is a regex applied to the exception message. To inspect the exception further:
+
+```python
+def test_error_carries_context():
+    with pytest.raises(ValueError) as exc_info:
+        mean([])
+    assert exc_info.value.args[0].startswith("Cannot")
+```
+
+## Parametrize — one test, many cases
+
+This is the single biggest win over hand-rolled loops, because each case is reported as a separate test.
+
+```python
+@pytest.mark.parametrize(
+    "values, expected",
+    [
+        ([1, 2, 3], 2),
+        ([10], 10),
+        ([-1, 1], 0),
+    ],
+)
+def test_mean_cases(values, expected):
+    assert mean(values) == expected
+```
+
+```
+tests/test_stats.py::test_mean_cases[values0-2]   PASSED
+tests/test_stats.py::test_mean_cases[values1-10]  PASSED
+tests/test_stats.py::test_mean_cases[values2-0]   PASSED
+```
+
+Give cases readable IDs when the auto-generated ones are opaque:
+
+```python
+@pytest.mark.parametrize(
+    "values, expected",
+    [
+        pytest.param([1, 2, 3], 2, id="typical"),
+        pytest.param([10], 10, id="single"),
+        pytest.param([], None, id="empty", marks=pytest.mark.xfail(raises=ValueError)),
+    ],
+)
+def test_mean_cases(values, expected):
+    assert mean(values) == expected
+```
+
+Stacking two `parametrize` decorators produces the Cartesian product (3 × 2 = 6 tests):
+
+```python
+@pytest.mark.parametrize("n", [1, 2, 3])
+@pytest.mark.parametrize("scale", [1.0, 2.0])
+def test_scaling(n, scale): ...
+```
+
+## Fixtures — setup/teardown as dependency injection
+
+A fixture is a function that produces a resource. A test *requests* it by naming it as a parameter. This is the part that feels unusual coming from R's `testthat`, but it's just DI.
+
+```python
+# tests/conftest.py
+import pytest
+
+@pytest.fixture
+def sample_data():
+    """Return a small in-memory dataset."""
+    return [1, 2, 3, 4, 5]
+
+@pytest.fixture
+def db_conn():
+    """Yield an open connection, closing it after the test."""
+    conn = connect(":memory:")
+    yield conn              # ← everything before yield is setup
+    conn.close()            # ← everything after is teardown, runs even on failure
+```
+
+```python
+# tests/test_stats.py
+def test_mean_uses_fixture(sample_data):
+    assert mean(sample_data) == 3
+```
+
+Fixtures compose — a fixture can request other fixtures:
+
+```
+        sample_data ─┐
+                     ├─→ populated_db ──→ test_query_returns_rows
+           db_conn ──┘
+```
+
+```python
+@pytest.fixture
+def populated_db(db_conn, sample_data):
+    """Yield a connection pre-loaded with sample rows."""
+    db_conn.executemany("INSERT INTO t VALUES (?)", [(v,) for v in sample_data])
+    yield db_conn
+```
+
+`conftest.py` needs no import — pytest finds it automatically and applies it to every test in that directory and below.
+
+### Fixture scope
+
+```
+scope="function"   (default) fresh per test        ← default, safest
+scope="class"      once per test class
+scope="module"     once per .py file
+scope="package"    once per package
+scope="session"    once per pytest run             ← for expensive resources
+```
+
+```python
+@pytest.fixture(scope="session")
+def ml_model():
+    """Load the model once for the whole test session."""
+    return load_model("weights.pt")
+```
+
+Lifecycle for `scope="module"` with three tests:
+
+```
+module setup ──┬─ test_a ─┐
+               ├─ test_b ─┤  (same object shared)
+               └─ test_c ─┘
+module teardown
+```
+
+Rule of thumb: widen the scope only for expensive, read-only resources. A shared mutable fixture creates order-dependent tests, which is the classic way a suite rots.
+
+## Built-in fixtures worth knowing
+
+```python
+def test_writes_report(tmp_path):
+    """tmp_path is a pathlib.Path to a fresh temp directory."""
+    out = tmp_path / "report.txt"
+    out.write_text("ok")
+    assert out.read_text() == "ok"
+
+def test_prints_banner(capsys):
+    """capsys captures stdout/stderr."""
+    print("hello")
+    captured = capsys.readouterr()
+    assert captured.out == "hello\n"
+
+def test_reads_env(monkeypatch):
+    """monkeypatch sets and auto-restores env vars, attributes, and dict keys."""
+    monkeypatch.setenv("API_KEY", "fake")
+    monkeypatch.setattr("mypkg.stats.slow_call", lambda: 42)
+    assert run() == 42
+```
+
+`monkeypatch` is the lightweight alternative to `unittest.mock.patch` — everything it touches is reverted at test end.
+
+## Markers
+
+```python
+@pytest.mark.skip(reason="not implemented yet")
+def test_future(): ...
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX only")
+def test_posix_path(): ...
+
+@pytest.mark.xfail(reason="known bug #42")
+def test_known_bug(): ...
+
+@pytest.mark.slow          # custom marker
+def test_full_pipeline(): ...
+```
+
+Custom markers must be registered, or pytest warns:
+
+```toml
+# pyproject.toml
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "gpu: requires a GPU",
+]
+```
+
+Then: `pytest -m "not slow"`.
+
+## Running tests
+
+```bash
+pytest                              # everything
+pytest tests/test_stats.py          # one file
+pytest tests/test_stats.py::test_mean_of_integers   # one test
+pytest -k "mean and not empty"      # substring expression on test names
+pytest -m slow                      # by marker
+pytest -v                           # verbose: one line per test
+pytest -q                           # quiet
+pytest -x                           # stop at first failure
+pytest --lf                         # rerun only last-failed
+pytest --ff                         # failures first, then the rest
+pytest -s                           # don't capture stdout (see your prints)
+pytest --durations=10               # 10 slowest tests
+```
+
+`--lf` and `-x` together make a tight red-green loop during debugging.
+
+## Configuration
+
+Put it in `pyproject.toml` so there's one config file:
+
+```toml
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = ["slow: long-running tests"]
+```
+
+`--strict-markers` turns typo'd markers into errors instead of silent no-ops. `-ra` prints a summary of all non-passing tests at the end.
+
+## Coverage
+
+```bash
+pip install pytest-cov
+pytest --cov=mypkg --cov-report=term-missing
+```
+
+`term-missing` lists the uncovered line numbers, which is the only part of a coverage report that's actionable.
+
+## Structuring a test
+
+Keep the Arrange–Act–Assert shape visible. It makes a failing test readable six months later:
+
+```python
+def test_mean_ignores_none_when_configured(sample_data):
+    # Arrange
+    values = sample_data + [None]
+    # Act
+    result = mean(values, skip_none=True)
+    # Assert
+    assert result == 3
+```
+
+One logical assertion per test where you can. A test that asserts five things reports only the first failure, so you lose information on every run.
+
+## If it helps as a bridge from R
+
+| testthat | pytest |
+|---|---|
+| `test_that("desc", {...})` | `def test_desc():` |
+| `expect_equal(x, y)` | `assert x == y` |
+| `expect_error(f(), "msg")` | `with pytest.raises(E, match="msg"):` |
+| `setup()` / `withr::local_*` | fixture with `yield` |
+| `patrick::with_parameters_test_that` | `@pytest.mark.parametrize` |
+| `helper-*.R` | `conftest.py` |
+| `skip_on_os("windows")` | `@pytest.mark.skipif(...)` |
+
+The main mental shift: in testthat the description string carries the intent; in pytest the *function name* does. Name tests as sentences — `test_mean_rejects_empty_input`, not `test_mean_2`.
+
+---
+
+Next steps once this is comfortable: fixture `params` (parametrizing a fixture itself), `pytest.ini` plugins like `pytest-xdist` for parallel runs, and `unittest.mock` for heavier test doubles.
