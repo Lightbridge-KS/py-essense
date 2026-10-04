@@ -9,6 +9,10 @@ book:
   site-url: https://py-essense-lightbridge.netlify.app
   chapters:
     - index.qmd
+    - part: OOP
+      chapters: 
+        - text: Protocol vs ABC
+          href: "contents/oop/protocols-vs-abc.qmd"
 
 format:
   html:

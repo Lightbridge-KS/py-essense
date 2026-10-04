@@ -1,0 +1,113 @@
+---
+title: "Protocol vs ABC"
+---
+
+
+**The short version:** an ABC asks *"Are you one of us?"* (you must inherit from it), while a Protocol asks *"Can you do this?"* (you only need the right methods). This is the difference between **nominal** and **structural** typing.
+
+```
+NOMINAL (ABC)                      STRUCTURAL (Protocol)
+─────────────                      ─────────────────────
+   ┌──────────┐                       ┌──────────────┐
+   │ Exporter │  ◄── must inherit     │ Exporter     │  ◄── just a "shape"
+   │  (ABC)   │                       │ (Protocol)   │
+   └────┬─────┘                       └──────────────┘
+        │ explicit                           ▲ matches if it has
+   ┌────┴─────┐                              ┊ the same methods
+   │ CsvExp   │                       ┌──────┴───────┐
+   └──────────┘                       │ CsvExp       │  (no inheritance!)
+                                      └──────────────┘
+"I declare I'm an Exporter"        "I behave like an Exporter"
+```
+
+## ABC: an explicit contract
+
+```python
+from abc import ABC, abstractmethod
+
+class Exporter(ABC):
+    """Base class for report exporters."""
+
+    @abstractmethod
+    def export(self, data: dict) -> str:
+        """Serialize data to a string."""
+
+    def save(self, data: dict, path: str) -> None:
+        """Shared concrete behavior inherited by all subclasses."""
+        with open(path, "w") as f:
+            f.write(self.export(data))
+
+class CsvExporter(Exporter):
+    def export(self, data: dict) -> str:
+        return ",".join(f"{k}={v}" for k, v in data.items())
+
+class Broken(Exporter):
+    pass
+
+Broken()  # TypeError at runtime: can't instantiate abstract class
+```
+
+What you get here: Python enforces the contract **at runtime** when you instantiate the class, you can share **concrete implementation** (`save`), and `isinstance(x, Exporter)` works through inheritance.
+
+## Protocol: duck typing the type checker understands
+
+```python
+from typing import Protocol
+
+class Exporter(Protocol):
+    """Anything that can export a dict to a string."""
+    def export(self, data: dict) -> str: ...
+
+class JsonExporter:  # no inheritance at all
+    def export(self, data: dict) -> str:
+        import json
+        return json.dumps(data)
+
+def publish(exp: Exporter, data: dict) -> None:
+    """Publish data using any exporter-like object."""
+    print(exp.export(data))
+
+publish(JsonExporter(), {"a": 1})  # ✅ mypy/pyright accept it
+publish(42, {"a": 1})              # ❌ type checker error (runtime: AttributeError)
+```
+
+The key point is that **Protocols are mainly checked by static type checkers** (mypy, pyright, VS Code's Pylance). At runtime, Python does almost nothing with them.
+
+## The runtime gotcha: `@runtime_checkable`
+
+```python
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class Closeable(Protocol):
+    def close(self) -> None: ...
+
+isinstance(open("x.txt", "w"), Closeable)  # True
+```
+
+`isinstance` checks **only that the method names exist**. It does not check signatures or return types, and it's slower than a normal `isinstance`. Treat it as a convenience, not as validation.
+
+## Side by side
+
+```
+                        ABC                     Protocol
+─────────────────────────────────────────────────────────────────
+Typing style            Nominal                 Structural
+Requires inheritance    Yes                     No
+Enforced when           Runtime (instantiate)   Static check (mypy/pyright)
+Shared implementation   Yes (concrete methods)  Possible, only if subclassed explicitly
+isinstance()            Yes                     Only with @runtime_checkable
+Works with 3rd-party /  No (unless .register()) Yes, automatically
+  built-in classes
+Coupling                Implementer → base      Implementer knows nothing
+```
+
+## When to use which
+
+**Use a Protocol** when you're defining what a *consumer* needs. This is SOLID in practice: the consumer owns a small interface (Interface Segregation), and the implementations depend on nothing (Dependency Inversion). It's especially good for types you don't control. For example, you could type a function as accepting "anything with `.read() -> bytes`", and pydicom file handles, `io.BytesIO`, or your own mocks would all satisfy it without changes. Tests get easier too, because a tiny fake class works with no inheritance.
+
+**Use an ABC** when you're building a *family* of classes that share real code (a template method like `save` above), when you want a hard runtime guarantee that subclasses are complete, or in plugin systems where explicit registration is part of the design.
+
+A common, clean architecture combines the two: the Protocol defines the interface at the boundary, and an optional ABC provides a convenient base class for people who want the shared helpers.
+
+One last tie-in: the standard library already mixes these ideas. `collections.abc.Iterable` is an ABC, but it uses `__subclasshook__` so that any class with `__iter__` counts as one. That's essentially a runtime protocol, and it predates `typing.Protocol` (added in Python 3.8 via PEP 544).
