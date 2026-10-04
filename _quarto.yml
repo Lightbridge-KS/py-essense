@@ -18,9 +18,12 @@ format:
   html:
     theme:
       light:
-        - cosmo
+        - theme/warm-light.scss
       dark:
-        - darkly
+        - theme/warm-dark.scss
+    highlight-style:
+      light: theme/atom-one-light-warm.theme
+      dark: theme/atom-one-dark-warm.theme
     toc-depth: 4
 
 freeze: auto
