@@ -1,0 +1,313 @@
+---
+title: "`argparse` Fundamentals"
+---
+
+
+## 1. Mental model
+
+`argparse` turns a list of strings from the command line into a typed, validated Python object. You declare the rules, and it handles parsing, type conversion, validation, `--help`, and error messages.
+
+```
+ $ python wordcount.py notes.txt -n 5 --verbose
+              │
+              ▼
+ sys.argv = ['wordcount.py', 'notes.txt', '-n', '5', '--verbose']
+              │  (argparse reads sys.argv[1:])
+              ▼
+ ┌───────────────────────────────┐
+ │ ArgumentParser                │ ◄── rules declared via add_argument()
+ │   .parse_args()               │
+ │   1. match tokens to args     │
+ │   2. convert with type=       │
+ │   3. validate (choices, ...)  │
+ │   4. fill defaults            │
+ └───────────────────────────────┘
+        │ OK                 │ invalid
+        ▼                    ▼
+ Namespace(file='notes.txt',   print usage + error to stderr
+           top=5,              exit with code 2
+           verbose=True)
+```
+
+The workflow always has three steps: **create a parser, add arguments, parse.**
+
+## 2. A minimal script
+
+```python
+"""Count words in a text file."""
+import argparse
+
+parser = argparse.ArgumentParser(description="Count words in a file.")
+parser.add_argument("file", help="path to a text file")
+parser.add_argument("-n", "--top", type=int, default=10, help="show top N words")
+parser.add_argument("-v", "--verbose", action="store_true", help="print extra info")
+
+args = parser.parse_args()
+print(args)          # Namespace(file='notes.txt', top=5, verbose=True)
+print(args.top + 1)  # 6  ← already an int, not '5'
+```
+
+You get `--help` for free:
+
+```
+$ python wordcount.py -h
+usage: wordcount.py [-h] [-n TOP] [-v] file
+
+Count words in a file.
+
+positional arguments:
+  file           path to a text file
+
+options:
+  -h, --help     show this help message and exit
+  -n, --top TOP  show top N words
+  -v, --verbose  print extra info
+```
+
+Bad input is rejected before your code runs:
+
+```
+$ python wordcount.py notes.txt -n abc
+usage: wordcount.py [-h] [-n TOP] [-v] file
+wordcount.py: error: argument -n/--top: invalid int value: 'abc'
+$ echo $?
+2
+```
+
+## 3. Positional vs. optional arguments
+
+The name you pass to `add_argument()` determines the kind of argument.
+
+```
+ add_argument("file")             add_argument("-n", "--top")
+ ───────────────────              ───────────────────────────
+ POSITIONAL                       OPTIONAL (a "flag" or "option")
+ • identified by position         • identified by its name
+ • required by default            • optional by default
+ • attribute: args.file           • attribute from the first long name:
+                                    --top     → args.top
+                                    --dry-run → args.dry_run  (dash → underscore)
+```
+
+You can override the attribute name with `dest="..."`, and change the placeholder shown in help with `metavar="N"`.
+
+## 4. The key `add_argument()` parameters
+
+**`type`** accepts any callable that takes one string and returns a value. It is not limited to built-in types:
+
+```python
+from pathlib import Path
+
+def positive_int(text: str) -> int:
+    """Convert text to an int > 0, or raise an argparse error."""
+    value = int(text)
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"must be > 0, got {value}")
+    return value
+
+parser.add_argument("file", type=Path)                # args.file is a Path
+parser.add_argument("-n", "--top", type=positive_int, default=10)
+```
+
+**`choices`** restricts the allowed values, and the help text lists them:
+
+```python
+parser.add_argument("--format", choices=["json", "csv", "table"], default="table")
+```
+
+**`action`** controls what happens when the flag appears:
+
+| action | Example input | Result |
+|---|---|---|
+| `"store"` (default) | `--top 5` | `top=5` |
+| `"store_true"` | `--verbose` | `verbose=True` (default `False`) |
+| `"store_false"` | `--no-cache` | `no_cache=False` (default `True`) |
+| `"count"` | `-vvv` | `verbose=3` (set `default=0`) |
+| `"append"` | `--tag a --tag b` | `tag=['a', 'b']` |
+| `argparse.BooleanOptionalAction` | `--color` / `--no-color` | `color=True` / `False` |
+
+**`nargs`** controls how many values one argument takes:
+
+| nargs | Meaning | Example |
+|---|---|---|
+| (unset) | exactly 1 value | `file` → `'a.txt'` |
+| `N` (int) | exactly N values, as a list | `--size 512 512` → `[512, 512]` |
+| `"?"` | 0 or 1 value | uses `default` (or `const` when the flag appears without a value) |
+| `"*"` | 0 or more values | `files` → `[]` or `['a', 'b']` |
+| `"+"` | 1 or more values | error if none are given |
+
+```python
+parser.add_argument("files", nargs="+", type=Path, help="one or more input files")
+```
+
+**`required=True`** makes an option mandatory. Use it sparingly: if a value is always required, a positional argument is usually the better fit.
+
+## 5. Two common pitfalls
+
+**The `type=bool` trap.**
+
+```python
+parser.add_argument("--debug", type=bool)   # ❌
+# --debug False  →  bool("False")  →  True   (any non-empty string is truthy)
+
+parser.add_argument("--debug", action="store_true")                   # ✅
+parser.add_argument("--debug", action=argparse.BooleanOptionalAction) # ✅ --debug / --no-debug
+```
+
+**Mutable defaults with `append`.** `append` adds to whatever the default is. With `default=["x"]`, user values are appended to `["x"]` instead of replacing it. Leave the default as `None` and handle it in code:
+
+```python
+tags = args.tag or ["default"]
+```
+
+## 6. Grouping arguments
+
+**Mutually exclusive groups** let the user pick at most one option from the group:
+
+```python
+group = parser.add_mutually_exclusive_group()
+group.add_argument("-q", "--quiet", action="store_true")
+group.add_argument("-v", "--verbose", action="store_true")
+# $ prog -q -v  →  error: argument -v/--verbose: not allowed with argument -q/--quiet
+```
+
+**Argument groups** only change how `--help` is organized. They have no effect on parsing:
+
+```python
+io = parser.add_argument_group("input/output")
+io.add_argument("-i", "--input", type=Path)
+io.add_argument("-o", "--output", type=Path)
+```
+
+## 7. Subcommands (as in `git commit` or `git push`)
+
+Each subcommand gets its own sub-parser with its own arguments. The idiomatic way to dispatch is to attach a handler function with `set_defaults(func=...)`:
+
+```
+ $ python todo.py add "Buy milk" --priority 2
+                   │
+     ┌─────────────┼──────────────┐
+     ▼             ▼              ▼
+  "add"         "list"         "done"      ◄── subparsers
+  title         --all          id
+  --priority
+     │
+     │ set_defaults(func=cmd_add)
+     ▼
+ Namespace(command='add', title='Buy milk', priority=2, func=<cmd_add>)
+     │
+     ▼
+ args.func(args)     ◄── dispatch with no if/elif chain
+```
+
+```python
+def cmd_add(args: argparse.Namespace) -> int:
+    """Add a new task."""
+    print(f"Added: {args.title} (priority {args.priority})")
+    return 0
+
+def cmd_list(args: argparse.Namespace) -> int:
+    """List tasks."""
+    print("Listing", "all" if args.all else "open", "tasks")
+    return 0
+
+subparsers = parser.add_subparsers(dest="command", required=True)
+
+p_add = subparsers.add_parser("add", help="add a task")
+p_add.add_argument("title")
+p_add.add_argument("-p", "--priority", type=int, choices=range(1, 4), default=2)
+p_add.set_defaults(func=cmd_add)
+
+p_list = subparsers.add_parser("list", help="list tasks")
+p_list.add_argument("--all", action="store_true")
+p_list.set_defaults(func=cmd_list)
+```
+
+This follows the Open/Closed principle: adding a new command means adding a function and a sub-parser, without touching the dispatch logic.
+
+## 8. A clean, testable structure
+
+This is the pattern I'd recommend for every CLI script. It separates the parser definition from the logic and makes the whole thing testable without a shell.
+
+```python
+"""Word-count CLI tool."""
+import argparse
+from collections import Counter
+from pathlib import Path
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build and return the CLI argument parser."""
+    parser = argparse.ArgumentParser(
+        prog="wordcount",
+        description="Show the most common words in text files.",
+    )
+    parser.add_argument("files", nargs="+", type=Path, help="input text files")
+    parser.add_argument("-n", "--top", type=int, default=10, help="number of words (default: %(default)s)")
+    parser.add_argument("-i", "--ignore-case", action="store_true", help="case-insensitive counting")
+    return parser
+
+
+def count_words(files: list[Path], ignore_case: bool) -> Counter[str]:
+    """Count words across all files."""
+    counter: Counter[str] = Counter()
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        counter.update((text.lower() if ignore_case else text).split())
+    return counter
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the CLI and return an exit code."""
+    parser = build_parser()
+    args = parser.parse_args(argv)          # argv=None → uses sys.argv[1:]
+
+    missing = [p for p in args.files if not p.is_file()]
+    if missing:
+        parser.error(f"file not found: {missing[0]}")   # usage + message, exit 2
+
+    for word, n in count_words(args.files, args.ignore_case).most_common(args.top):
+        print(f"{n:>6}  {word}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+Each part of this layout has a job:
+
+```
+ build_parser()  → WHAT the CLI accepts   (declarative, no side effects)
+ count_words()   → WHAT the program does  (pure logic, no argparse inside)
+ main(argv)      → glue: parse → validate → call logic → return exit code
+```
+
+A few details are worth noting. `%(default)s` in a help string is filled in automatically with the default value. `parser.error()` is how you report your own validation errors in the same style argparse uses. `main(argv=None)` lets tests pass a list instead of reading the real command line. Finally, `raise SystemExit(main())` sends the return value to the shell as the exit code (0 means success).
+
+## 9. Testing without a terminal
+
+Because `parse_args()` accepts a list, testing is simple:
+
+```python
+import pytest
+from wordcount import build_parser, main
+
+def test_parse_defaults():
+    """Default values are applied when options are omitted."""
+    args = build_parser().parse_args(["a.txt"])
+    assert args.top == 10 and args.ignore_case is False
+
+def test_invalid_top_exits_with_code_2():
+    """A non-integer --top value makes argparse exit with code 2."""
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(["a.txt", "-n", "abc"])
+    assert exc.value.code == 2
+```
+
+## 10. Where to go next
+
+Once the basics feel natural, these are useful to explore: `parse_known_args()` (parse what you recognize and leave the rest, which is handy for wrapper scripts); `fromfile_prefix_chars="@"` (read arguments from a file with `prog @args.txt`); `formatter_class=argparse.ArgumentDefaultsHelpFormatter` (show every default in the help automatically); and in Python 3.14, the new `suggest_on_error` and `color` options on `ArgumentParser`.
+
+It is also worth knowing the alternatives. **Click** (decorator-based) and **Typer** (built on type hints) reduce boilerplate for larger CLIs. Learning `argparse` first is still a good investment: it is in the standard library with zero dependencies, and the concepts (positionals, options, actions, subcommands) carry over directly to those libraries.
+

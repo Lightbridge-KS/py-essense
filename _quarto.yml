@@ -21,6 +21,10 @@ book:
       chapters: 
         - text: "__main__.py"
           href: "contents/packages/__main__.qmd"
+    - part: CLI
+      chapters: 
+        - text: argparse Funda
+          href: "contents/cli/argparse-funda.qmd"
 
 format:
   html:
