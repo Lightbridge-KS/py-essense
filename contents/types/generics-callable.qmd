@@ -1,0 +1,386 @@
+---
+title: "Generic and Callable"
+---
+
+Both answer the question "how do I describe a type that is built from other types?", but they apply to different things:
+
+```
+Generic   → how to make YOUR OWN CLASS take type parameters      Box[int], Stack[str]
+Callable  → how to describe the type of a FUNCTION VALUE         Callable[[int], str]
+```
+
+## Summary
+
+```
+┌─────────────────────┬──────────────────────────────────┬──────────────────────────────┐
+│ Tool                │ Use it for                       │ Modern form (3.12+)          │
+├─────────────────────┼──────────────────────────────────┼──────────────────────────────┤
+│ Generic[T]          │ your class takes type params     │ class C[T]: ...              │
+│ Callable[[A], R]    │ simple function values           │ from collections.abc         │
+│ Callable[..., R]    │ "any args" escape hatch          │ (avoid when you can)         │
+│ Protocol.__call__   │ keywords/defaults/overloads      │ class P(Protocol)            │
+│ ParamSpec           │ decorators keeping signature     │ def deco[**P, R](...)        │
+│ Concatenate         │ decorators adding/removing args  │ Concatenate[X, P]            │
+└─────────────────────┴──────────────────────────────────┴──────────────────────────────┘
+```
+
+---
+
+## Part 1: `Generic`
+
+### The problem it solves
+
+Built-in containers are already parameterized: `list[int]` and `dict[str, float]` tell the checker what is inside. `Generic` lets **your own classes** do the same.
+
+```
+list[int]      Stack[int]       Cache[str, User]
+  │   │          │    │           │     │    │
+  │   └─ type    │    └─ type     │     └────┴── two type parameters
+  │      arg     │       arg      │
+  └─ built-in    └─ YOUR class ───┘  ← needs Generic (or the [T] syntax)
+```
+
+### Old syntax vs new syntax
+
+The old way (3.5 to 3.11) inherits from `Generic[T]`. Here `T` is a TypeVar, as covered in the previous answer:
+
+```python
+from typing import Generic, TypeVar
+
+T = TypeVar("T")
+
+class Stack(Generic[T]):
+    """LIFO stack of items of type T."""
+
+    def __init__(self) -> None:
+        self._items: list[T] = []
+
+    def push(self, item: T) -> None:
+        """Add an item on top."""
+        self._items.append(item)
+
+    def pop(self) -> T:
+        """Remove and return the top item."""
+        return self._items.pop()
+```
+
+The new way (3.12+) is shorter. The `[T]` after the class name **implicitly** makes the class inherit from `Generic`:
+
+```python
+class Stack[T]:
+    """LIFO stack of items of type T."""
+
+    def __init__(self) -> None:
+        self._items: list[T] = []
+
+    def push(self, item: T) -> None:
+        """Add an item on top."""
+        self._items.append(item)
+
+    def pop(self) -> T:
+        """Remove and return the top item."""
+        return self._items.pop()
+```
+
+Usage is identical for both versions:
+
+```python
+s = Stack[int]()
+s.push(1)        # ✅
+s.push("a")      # ❌ checker: expected int
+x = s.pop()      # x: int
+
+s2 = Stack[str]()
+s2.push("a")     # ✅
+```
+
+So **`Generic` is the old explicit mechanism, and `class C[T]` is its modern syntax sugar**. You will still read `Generic[T]` constantly in libraries and older code, so it is worth recognizing. Don't mix the two styles in one class: `class Stack[T](Generic[T])` is an error.
+
+### Multiple parameters and bounds
+
+```python
+from collections.abc import Hashable
+
+class Cache[K: Hashable, V]:
+    """Key-value cache; keys must be hashable."""
+
+    def __init__(self) -> None:
+        self._data: dict[K, V] = {}
+
+    def get(self, key: K) -> V | None:
+        """Return cached value or None."""
+        return self._data.get(key)
+
+    def set(self, key: K, value: V) -> None:
+        """Store a value."""
+        self._data[key] = value
+
+c = Cache[str, float]()
+c.set("pi", 3.14)      # ✅
+c.set(1, 3.14)         # ❌ key must be str
+```
+
+### Inheriting from a generic class
+
+When you subclass a generic class, you can either **fix** the type parameter or **pass it through**:
+
+```
+               Stack[T]
+              /        \
+   IntStack(Stack[int])   LoggedStack[T](Stack[T])
+   (T fixed to int)       (still generic)
+```
+
+```python
+class IntStack(Stack[int]):
+    """Stack that only holds ints."""
+
+    def total(self) -> int:
+        """Sum all items."""
+        return sum(self._items)
+
+
+class LoggedStack[T](Stack[T]):
+    """Stack that prints every push."""
+
+    def push(self, item: T) -> None:
+        """Log then push."""
+        print(f"push {item!r}")
+        super().push(item)
+```
+
+### What happens at runtime? (type erasure)
+
+Just like the other typing constructs, the type parameter is **not enforced** at runtime. Python only records it:
+
+```python
+s = Stack[int]()
+s.push("oops")              # runs fine at runtime, only the checker complains
+
+print(s.__orig_class__)     # Stack[int]  ← remembered, but not checked
+print(Stack.__type_params__)   # (T,)  ← new syntax (old syntax: __parameters__)
+
+isinstance(s, Stack)        # ✅ True
+isinstance(s, Stack[int])   # ❌ TypeError, because parameterized generics can't be checked
+```
+
+---
+
+## Part 2: `Callable`
+
+### The problem it solves
+
+In Python, functions are values that you pass around: callbacks, `key=` functions, strategies, decorators. `Callable` describes **what kind of function** a variable holds.
+
+```python
+from collections.abc import Callable    # ✅ preferred since 3.9
+# from typing import Callable           # still works, but is a deprecated alias
+```
+
+### Anatomy
+
+```
+Callable[ [int, str],  bool ]
+          └────┬────┘  └─┬─┘
+          argument      return
+          types (list)  type
+
+Callable[[], None]        → takes nothing, returns nothing
+Callable[[float], float]  → e.g. math.sqrt
+Callable[..., int]        → any arguments at all, returns int  (the "escape hatch")
+```
+
+### Basic usage: callbacks
+
+```python
+from collections.abc import Callable
+
+def apply_twice(f: Callable[[int], int], x: int) -> int:
+    """Apply f to x two times."""
+    return f(f(x))
+
+def double(n: int) -> int:
+    """Return n * 2."""
+    return n * 2
+
+apply_twice(double, 3)          # ✅ 12
+apply_twice(lambda n: n + 1, 3) # ✅ 5
+apply_twice(str.upper, 3)       # ❌ checker: (str) -> str is not (int) -> int
+```
+
+### Callable combined with type parameters
+
+`Callable` becomes really powerful when its argument and return types are linked by type parameters:
+
+```python
+def map_list[T, R](f: Callable[[T], R], items: list[T]) -> list[R]:
+    """Apply f to every item."""
+    return [f(x) for x in items]
+
+lengths = map_list(len, ["a", "bb", "ccc"])     # list[int]
+names   = map_list(str.upper, ["x", "y"])       # list[str]
+```
+
+The checker traces the flow like this:
+
+```
+items: list[str]  ──►  T = str
+f = len: (Sized) -> int  ──►  accepts str ✓, R = int
+return list[R]  ──►  list[int]
+```
+
+### Returning functions (factories and closures)
+
+```python
+def make_scaler(factor: float) -> Callable[[float], float]:
+    """Create a function that multiplies by factor."""
+    def scale(x: float) -> float:
+        return x * factor
+    return scale
+
+to_mm = make_scaler(10.0)
+to_mm(3.2)    # 32.0
+```
+
+### Limitation: `Callable` can't describe everything
+
+`Callable[[int, str], bool]` only describes **positional** arguments. It cannot express keyword names, default values, `*args`, or overloads. For those cases, use a **callback Protocol**, which is a class that has only a `__call__` method:
+
+```python
+from typing import Protocol
+
+class Formatter(Protocol):
+    """Function that formats a value with an optional precision."""
+    def __call__(self, value: float, *, precision: int = 2) -> str: ...
+
+def fmt(value: float, *, precision: int = 2) -> str:
+    """Format a float."""
+    return f"{value:.{precision}f}"
+
+def report(f: Formatter) -> None:
+    """Print a formatted number."""
+    print(f(3.14159, precision=3))
+
+report(fmt)   # ✅ any function with a matching signature fits, no inheritance needed
+```
+
+```
+Callable[[A, B], R]   → simple, positional-only shape  (use 90% of the time)
+Protocol + __call__   → exact signature: keywords, defaults, overloads
+```
+
+### Typing decorators: `ParamSpec`
+
+This is the classic hard case. A decorator returns a wrapper, and you want the checker to keep the **original function's full signature**. If you write `Callable[..., R]`, the signature is lost. `ParamSpec`, written `**P` in the new syntax, captures the whole parameter list:
+
+```python
+import functools
+import time
+from collections.abc import Callable
+
+def timed[**P, R](func: Callable[P, R]) -> Callable[P, R]:
+    """Print how long func takes."""
+    @functools.wraps(func)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        start = time.perf_counter()
+        result = func(*args, **kwargs)
+        print(f"{func.__name__}: {time.perf_counter() - start:.4f}s")
+        return result
+    return wrapper
+
+@timed
+def resize(width: int, height: int, *, keep_ratio: bool = True) -> tuple[int, int]:
+    """Return a new image size."""
+    return (width, height)
+
+resize(512, 512, keep_ratio=False)   # ✅ full signature preserved
+resize("512", 512)                   # ❌ still caught
+```
+
+```
+              ┌────────── P ──────────┐   R
+resize: ( width: int, height: int, *, keep_ratio: bool = True ) -> tuple[int, int]
+                         │
+                @timed: Callable[P, R] -> Callable[P, R]
+                         │
+wrapper: ( same P, captured exactly ) -> same R
+```
+
+### Decorators that add or remove arguments: `Concatenate`
+
+Some decorators inject an argument, so the caller doesn't pass it. `Concatenate` expresses "the original function takes `X` plus `P`, and the wrapped function takes only `P`":
+
+```python
+import logging
+from typing import Concatenate
+
+def with_logger[**P, R](
+    func: Callable[Concatenate[logging.Logger, P], R],
+) -> Callable[P, R]:
+    """Inject a logger as the first argument."""
+    log = logging.getLogger(func.__name__)
+
+    @functools.wraps(func)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        return func(log, *args, **kwargs)
+    return wrapper
+
+@with_logger
+def process(log: logging.Logger, path: str) -> int:
+    """Process a file."""
+    log.info("processing %s", path)
+    return 0
+
+process("scan.dcm")    # ✅ the caller doesn't pass the logger
+```
+
+### Bonus: Callable variance
+
+The checker treats callable arguments "backwards". A function that accepts **more** is a valid substitute, and so is a function that returns **less** (a more specific type):
+
+```
+Needed:  Callable[[int], object]
+
+✅ (object) -> str     accepts MORE (object ⊇ int), returns LESS specific-ly broad (str ⊂ object)
+❌ (bool)   -> object  accepts LESS: what if someone passes 5?
+```
+
+The rule of thumb is that arguments are **contravariant** and return types are **covariant**. This is the Liskov Substitution Principle from SOLID, enforced by the type checker.
+
+---
+
+## Part 3: Generic and Callable together
+
+A typed processing pipeline is a natural fit for both. The class is generic over the item type, and it stores callables:
+
+```python
+from collections.abc import Callable
+from dataclasses import dataclass, field
+
+@dataclass
+class Pipeline[T]:
+    """Chain of transform steps applied to a value of type T."""
+    steps: list[Callable[[T], T]] = field(default_factory=list)
+
+    def add(self, step: Callable[[T], T]) -> "Pipeline[T]":
+        """Append a step and return self for chaining."""
+        self.steps.append(step)
+        return self
+
+    def run(self, value: T) -> T:
+        """Apply all steps in order."""
+        for step in self.steps:
+            value = step(value)
+        return value
+
+clean = (
+    Pipeline[str]()
+    .add(str.strip)
+    .add(str.lower)
+    .add(lambda s: s.replace(" ", "_"))
+)
+clean.run("  CT Brain Plain  ")    # 'ct_brain_plain'
+
+clean.add(len)    # ❌ checker: (str) -> int is not (str) -> str
+```
+

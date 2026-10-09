@@ -17,6 +17,8 @@ book:
       chapters: 
         - text: Python Types
           href: "contents/types/py-typings.qmd"
+        - text: Generic and Callable
+          href: "contents/types/generics-callable.qmd"
     - part: Tests
       chapters: 
         - text: Pytest Basics
