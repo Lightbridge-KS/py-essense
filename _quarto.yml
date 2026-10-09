@@ -13,6 +13,10 @@ book:
       chapters: 
         - text: Protocol vs ABC
           href: "contents/oop/protocols-vs-abc.qmd"
+    - part: Types
+      chapters: 
+        - text: Python Types
+          href: "contents/types/py-typings.qmd"
     - part: Tests
       chapters: 
         - text: Pytest Basics

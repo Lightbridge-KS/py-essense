@@ -1,0 +1,383 @@
+---
+title: "Python Typing"
+---
+
+Python's typing features grew in layers. The most useful way to keep them apart is to first separate two worlds, because each construct lives in a different place between them.
+
+## The big picture: two worlds
+
+```
+              STATIC WORLD                         RUNTIME WORLD
+     (mypy / pyright / Pylance read it)        (the Python interpreter runs it)
+   ───────────────────────────────────────────────────────────────────────────
+   Type Alias  ──── just a name for a type ───────► (nothing new at runtime)
+   NewType     ──── a "distinct" type ────────────► the original value, unchanged
+   TypedDict   ──── shape of a dict ──────────────► a plain dict
+   TypeVar     ──── placeholder for "some type" ──► (nothing new at runtime)
+   dataclass   ──── a type ───────────────────────► a REAL class with __init__,
+                                                    __repr__, __eq__, ...
+```
+
+The first four are mostly **instructions to the type checker**. Only `dataclass` creates new runtime behavior. Python itself never enforces any of these annotations. To see the errors in the examples below, you need a type checker: run `mypy file.py` or `pyright file.py`, or rely on Pylance in VS Code with type checking set to "basic" or "strict".
+
+## Timeline of evolution
+
+```
+3.5   (2015)  PEP 484  typing module: TypeVar, Generic, aliases (X = ...), NewType (3.5.2)
+3.7   (2018)  PEP 557  @dataclass
+3.8   (2019)  PEP 589  TypedDict
+3.10  (2021)  PEP 604  X | Y union syntax
+              PEP 613  explicit TypeAlias
+              dataclass(slots=True, kw_only=True)
+3.11  (2022)  PEP 655  Required / NotRequired in TypedDict
+              PEP 673  Self
+3.12  (2023)  PEP 695  `type` statement + `def f[T]()` / `class C[T]` syntax
+              PEP 692  Unpack[TypedDict] for **kwargs
+3.13  (2024)  PEP 696  TypeVar defaults  ([T = int])
+              PEP 705  ReadOnly in TypedDict
+3.14  (2025)  PEP 649  annotations evaluated lazily (forward refs just work)
+```
+
+The overall direction is that typing moved from verbose `typing` imports toward **built-in syntax**.
+
+---
+
+## 1. Type Alias: "give a long type a short name"
+
+An alias is a nickname. The alias and the original type are **100% interchangeable**.
+
+The alias syntax has gone through three generations:
+
+```python
+# Gen 1 (3.5+): implicit, plain assignment
+Coordinates = tuple[float, float]
+
+# Gen 2 (3.10+): explicit, so the checker knows it's an alias and not a variable
+from typing import TypeAlias
+Coordinates: TypeAlias = tuple[float, float]
+
+# Gen 3 (3.12+): the `type` statement  ← use this today
+type Coordinates = tuple[float, float]
+```
+
+The Gen 3 form has three advantages:
+
+```python
+# 1. Generic aliases without TypeVar boilerplate
+type Pair[T] = tuple[T, T]
+type JSON = dict[str, "JSON"] | list["JSON"] | str | int | float | bool | None
+
+# 2. Lazy evaluation, so recursive or forward references work naturally
+type Tree = dict[str, Tree] | int        # no quotes needed
+
+# 3. It is a real TypeAliasType object you can inspect
+print(Coordinates.__value__)              # tuple[float, float]
+```
+
+The key limitation is that an alias gives you **no safety**:
+
+```python
+type Meters = float
+type Seconds = float
+
+def speed(d: Meters, t: Seconds) -> float:
+    """Return speed in m/s."""
+    return d / t
+
+speed(t, d)   # ✅ type checker is happy, because both are just float. Bug slips through!
+```
+
+The next construct, `NewType`, solves exactly this problem.
+
+## 2. `NewType`: "same value, different identity"
+
+`NewType` creates a type that the checker treats as a **distinct subtype**. At runtime it costs nothing.
+
+```python
+from typing import NewType
+
+UserId = NewType("UserId", int)
+OrderId = NewType("OrderId", int)
+
+def get_user(uid: UserId) -> str:
+    """Fetch a username by ID."""
+    return f"user-{uid}"
+
+uid = UserId(42)
+oid = OrderId(42)
+
+get_user(uid)    # ✅
+get_user(oid)    # ❌ checker: expected "UserId", got "OrderId"
+get_user(42)     # ❌ checker: expected "UserId", got "int"
+
+print(uid + 1)         # ✅ 43, still behaves as an int (result type is int, not UserId)
+print(type(uid))       # <class 'int'>  ← at runtime it's just int
+```
+
+The two constructs differ in how the checker treats them:
+
+```
+Type Alias:   Meters  ═══  float           (identical, interchangeable)
+NewType:      UserId  ──►  int             (UserId IS-A int, but int is NOT a UserId)
+                           ▲
+              you must "brand" it explicitly: UserId(42)
+```
+
+`NewType` has a few rules worth knowing:
+
+```python
+AdminId = NewType("AdminId", UserId)   # ✅ NewType of a NewType is allowed
+
+class Admin(UserId): ...               # ❌ cannot subclass a NewType
+isinstance(uid, UserId)                # ❌ TypeError, because it doesn't exist as a class
+```
+
+Use `NewType` for IDs, units, and validated strings (`SanitizedSQL`, `Email`). Anywhere mixing up two values of the same primitive type would be a bug, `NewType` lets the checker catch it.
+
+## 3. `TypedDict`: "describe the shape of a dict"
+
+Some data must stay a `dict`, such as JSON from an API, config files, or `**kwargs`. In those cases `TypedDict` tells the checker which keys exist and what type each value has.
+
+```python
+from typing import TypedDict, NotRequired, ReadOnly
+
+class Movie(TypedDict):
+    """Movie record from an API."""
+    id: ReadOnly[int]           # 3.13+: checker forbids reassignment
+    title: str
+    year: int
+    rating: NotRequired[float]  # 3.11+: key may be absent
+
+m: Movie = {"id": 1, "title": "Arrival", "year": 2016}   # ✅ rating optional
+
+m["title"] = "Dune"       # ✅
+m["id"] = 2               # ❌ ReadOnly
+m["director"] = "X"       # ❌ unknown key
+m["year"] = "2016"        # ❌ wrong value type
+
+print(type(m))            # <class 'dict'>  ← just a dict at runtime
+```
+
+You can also flip the default so that every key is optional, then mark the required ones:
+
+```python
+from typing import Required
+
+class Options(TypedDict, total=False):
+    """Plot options; all optional except `title`."""
+    title: Required[str]
+    width: int
+    height: int
+```
+
+TypedDict also lets you type `**kwargs` precisely (3.12+):
+
+```python
+from typing import Unpack
+
+def plot(**kwargs: Unpack[Options]) -> None:
+    """Draw a plot with typed keyword options."""
+    ...
+
+plot(title="CT", width=512)    # ✅
+plot(title="CT", widht=512)    # ❌ typo caught!
+```
+
+One important caveat is that **there is no validation at runtime**. `json.loads(...)` typed as `Movie` is a promise you make to the checker, not a check Python performs. If you need real validation, use Pydantic.
+
+## 4. `TypeVar`: "a placeholder that links types together"
+
+A `TypeVar` lets you write **generic** code where the output type depends on the input type. It is the typing version of a function parameter.
+
+Without a TypeVar, you lose information:
+
+```python
+from typing import Any
+
+def first(xs: list[Any]) -> Any:
+    """Return the first element."""
+    return xs[0]
+
+n = first([1, 2, 3])    # n: Any  ← checker forgot it was an int
+```
+
+The old syntax (3.5 to 3.11) declares the TypeVar separately:
+
+```python
+from typing import TypeVar, Generic
+
+T = TypeVar("T")
+
+def first(xs: list[T]) -> T:
+    """Return the first element."""
+    return xs[0]
+
+class Box(Generic[T]):
+    """A container holding one item."""
+    def __init__(self, item: T) -> None:
+        self.item = item
+```
+
+The new syntax (3.12+) puts the type parameter right in the definition. Use this form today:
+
+```python
+def first[T](xs: list[T]) -> T:
+    """Return the first element."""
+    return xs[0]
+
+class Box[T]:
+    """A container holding one item."""
+    def __init__(self, item: T) -> None:
+        self.item = item
+
+n = first([1, 2, 3])          # n: int  ✅ type preserved
+s = Box("hi").item            # s: str
+```
+
+The new syntax also handles bounds, constraints, and defaults. Bounds and constraints look similar but behave differently:
+
+```python
+from collections.abc import Sized
+
+# BOUND: T can be any subtype of Sized, and the exact subtype is preserved
+def longest[T: Sized](a: T, b: T) -> T:
+    """Return the longer of two sized objects."""
+    return a if len(a) >= len(b) else b
+
+longest([1, 2], [3])          # → list[int]
+longest("ab", "c")            # → str
+
+# CONSTRAINTS: T must be exactly ONE of the listed types
+def concat[T: (str, bytes)](a: T, b: T) -> T:
+    """Concatenate two str or two bytes."""
+    return a + b
+
+concat("a", "b")              # ✅ str
+concat(b"a", b"b")            # ✅ bytes
+concat("a", b"b")             # ❌ can't mix
+
+# DEFAULT (3.13+): used when the type can't be inferred
+class Response[T = dict]:
+    """HTTP response with a typed body."""
+    ...
+```
+
+The bound/constraint difference in one picture:
+
+```
+Bound  [T: Sized]          → T ∈ { anything under Sized }  (list, str, set, MyClass...)
+Constraint [T: (str, bytes)] → T ∈ { str } OR { bytes }     (exactly one, no subclasses kept)
+```
+
+The new syntax also **infers variance** automatically. In the old style you had to write `TypeVar("T_co", covariant=True)` by hand.
+
+## 5. `dataclass`: "a real class that writes its own boilerplate"
+
+This is the odd one out. A dataclass is a **runtime** class with real behavior. The annotations tell the decorator which fields to generate.
+
+```python
+from dataclasses import dataclass, field
+
+@dataclass(frozen=True, slots=True, kw_only=True)   # slots/kw_only: 3.10+
+class Patient:
+    """Immutable patient record."""
+    hn: str
+    name: str
+    age: int
+    tags: list[str] = field(default_factory=list)    # never use a bare `= []`
+
+    def __post_init__(self) -> None:
+        """Validate after auto-generated __init__."""
+        if self.age < 0:
+            raise ValueError("age must be >= 0")
+
+p = Patient(hn="123", name="A", age=40)
+print(p)                     # Patient(hn='123', name='A', age=40, tags=[])  ← auto __repr__
+p == Patient(hn="123", name="A", age=40)   # True  ← auto __eq__
+p.age = 41                   # ❌ FrozenInstanceError (runtime!)
+```
+
+The decorator generates all of this for you:
+
+```
+@dataclass  ──generates──►  __init__   __repr__   __eq__
+   frozen=True    ──►       __setattr__ raises, plus __hash__
+   order=True     ──►       __lt__, __le__, __gt__, __ge__
+   slots=True     ──►       __slots__ (less memory, faster attribute access)
+```
+
+Two caveats apply. First, `Patient(hn=1, name=None, age="x")` **runs fine**, because the type hints are still not enforced (only `__post_init__` checks run). Second, a dataclass combines well with generics:
+
+```python
+@dataclass
+class Result[T]:
+    """Value or error wrapper."""
+    value: T | None = None
+    error: str | None = None
+
+r = Result(value=3.14)       # Result[float]
+```
+
+---
+
+## Side-by-side comparison
+
+```
+┌────────────┬──────────────────────────┬─────────────────┬───────────────┬──────────────┐
+│ Construct  │ Purpose                  │ Runtime object  │ Checker sees  │ isinstance?  │
+├────────────┼──────────────────────────┼─────────────────┼───────────────┼──────────────┤
+│ Type Alias │ shorten / name a type    │ none (or        │ same as       │ old style: ✅│
+│            │                          │ TypeAliasType)  │ original      │ `type`:   ❌ │
+│ NewType    │ distinct "branded" type  │ the base value  │ subtype       │ ❌           │
+│ TypedDict  │ shape of a dict          │ plain dict      │ keyed struct  │ ❌           │
+│ TypeVar    │ generic placeholder      │ none            │ "some T"      │ n/a          │
+│ dataclass  │ data-holding class       │ REAL class      │ class         │ ✅           │
+└────────────┴──────────────────────────┴─────────────────┴───────────────┴──────────────┘
+```
+
+## Decision flow
+
+```
+Do I need a new runtime object with methods or behavior?
+ ├─ YES ──► @dataclass  (or Pydantic if you need runtime validation)
+ └─ NO
+     ├─ Must the data stay a dict (JSON, **kwargs)? ──► TypedDict
+     ├─ Must two same-typed values never be mixed?  ──► NewType
+     ├─ Does an output type depend on an input type? ─► TypeVar / [T] syntax
+     └─ Is a type annotation just long or repeated?  ──► type Alias = ...
+```
+
+## All five working together
+
+```python
+from dataclasses import dataclass
+from typing import NewType, TypedDict
+
+StudyId = NewType("StudyId", str)                    # NewType: brand the ID
+
+class StudyJSON(TypedDict):                          # TypedDict: raw API shape
+    """Study payload from the API."""
+    id: str
+    modality: str
+
+@dataclass(frozen=True, slots=True)                  # dataclass: domain object
+class Study:
+    """A validated imaging study."""
+    id: StudyId
+    modality: str
+
+type Registry[K, V] = dict[K, V]                     # generic type alias
+
+def index_by[K, V](items: list[V], key: str) -> Registry[K, V]:   # TypeVars
+    """Index items by an attribute name."""
+    return {getattr(it, key): it for it in items}
+
+def parse(raw: StudyJSON) -> Study:
+    """Convert raw JSON into a Study."""
+    return Study(id=StudyId(raw["id"]), modality=raw["modality"])
+
+studies = [parse({"id": "S1", "modality": "CT"})]
+reg: Registry[StudyId, Study] = index_by(studies, "id")
+```
+
+This pattern is common in well-typed codebases: a **TypedDict at the boundary** (untrusted dict data) gets converted into a **dataclass in the core** (trusted objects), with **NewTypes for IDs**, **TypeVars for reusable utilities**, and **aliases for readability**.
