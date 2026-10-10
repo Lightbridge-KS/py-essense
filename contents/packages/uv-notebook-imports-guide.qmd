@@ -1,0 +1,281 @@
+---
+title: "Importing `src/` Code into Jupyter Notebooks in a `uv` Project"
+subtitle: "Editable installs, the src layout, and two build backends"
+---
+
+# The Problem
+
+You have a data analysis project managed by `uv`, with reusable code in `src/` and exploratory work in `notebooks/`:
+
+```
+.
+├── .venv/
+├── pyproject.toml
+├── src/
+│   ├── __init__.py
+│   ├── simplehelper.py
+│   └── somepkg/
+└── notebooks/
+    └── *.ipynb
+```
+
+You want the first cell of any notebook to be able to do:
+
+```python
+from myproject import simplehelper
+```
+
+The cleanest solution is to make the project an **installable package** and install it into `.venv` in **editable mode**. The notebook then imports your code like any other library: no `sys.path` hacks, and it works the same in notebooks, scripts, and tests.
+
+```
+Big picture
+───────────
+pyproject.toml ──(build system)──► uv sync ──(editable install)──► .venv
+                                                                    │
+notebook kernel = .venv ◄───────────────────────────────────────────┘
+       │
+       └── import myproject   ✓ (resolves to ./src/myproject, live)
+```
+
+# Step 1: Fix the Layout
+
+In the **src layout**, `src/` is a *container*, not a package. The `__init__.py` belongs one level deeper, inside a folder named after your package.
+
+```
+Before (import name would be "src")      After (import name is "myproject")
+───────────────────────────────────      ──────────────────────────────────
+src/                                     src/
+├── __init__.py   ✗                      └── myproject/
+├── simplehelper.py                          ├── __init__.py
+└── somepkg/                                 ├── simplehelper.py
+                                             └── somepkg/
+                                                 └── __init__.py
+```
+
+::: {.callout-important}
+## Why not `import src.simplehelper`?
+
+- It leaks a folder name into every import path in your code.
+- Every project has a `src`, so the name collides across projects.
+- It defeats the purpose of the src layout, which is to force you to import the **installed** package, so you never accidentally import loose files from the working directory.
+:::
+
+The shell commands to restructure:
+
+```zsh
+mkdir -p src/myproject
+git mv src/__init__.py src/simplehelper.py src/somepkg src/myproject/
+```
+
+(Use plain `mv` if the files are not yet tracked by Git.)
+
+# Step 2: Add a Build System to `pyproject.toml`
+
+A `[build-system]` table is what tells `uv` "this project is a package, install it". Without it, `uv` treats the project as a plain application and does **not** install your `src/` code into `.venv`.
+
+You can choose either backend below. Both produce the same result for this use case.
+
+## Option A: `uv_build` (uv's native backend)
+
+`uv_build` uses **convention over configuration**: it looks for `src/<normalized project name>/__init__.py` automatically.
+
+### Minimal version (relies on conventions)
+
+```toml
+[project]
+name = "myproject"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["pandas"]
+
+[dependency-groups]
+dev = ["ipykernel"]
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13"]
+build-backend = "uv_build"
+```
+
+"Normalized" means hyphens become underscores:
+
+| `[project] name` | Expected module folder   | Import statement            |
+|------------------|--------------------------|-----------------------------|
+| `myproject`      | `src/myproject/`         | `import myproject`          |
+| `my-project`     | `src/my_project/`        | `import my_project`         |
+
+### Explicit version (when the folder name differs from the project name)
+
+If you want the distribution name and the import name to differ, configure them under `[tool.uv.build-backend]`:
+
+```toml
+[project]
+name = "ramaai-analysis"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["pandas"]
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "rama"     # import name → src/rama/__init__.py
+module-root = "src"      # default; shown here for clarity
+```
+
+Setting `module-root = ""` drops the src layout and looks for the package at the project root instead (e.g. `./rama/__init__.py`).
+
+### How the pieces connect
+
+```
+pyproject.toml                         filesystem                 notebook
+──────────────                         ──────────                 ────────
+name = "my-project" ─normalize─► src/my_project/__init__.py ◄── from my_project import ...
+   (or module-name = "x" ──────► src/x/__init__.py)
+                                         ▲
+uv sync ──editable install──► .venv/.../*.pth points here
+```
+
+### Things to know about `uv_build`
+
+- **Strict by design.** If the expected `__init__.py` is missing, `uv sync` fails with a clear error instead of silently building an empty package. This is the most common stumbling block when converting an existing folder.
+- **No dynamic versioning.** `dynamic = ["version"]` is not supported; write the version literally.
+- **No build hooks.** Generated files must exist before the build. Irrelevant for a data analysis project.
+- **Version pin.** The upper bound (`<0.13`) protects against breaking changes in future minor releases. The `uv` executable bundles its own copy of the backend and uses it when it satisfies the pin, so you rarely need to touch this. To see the pin your installed `uv` generates, run `uv init --package` in a scratch folder.
+
+## Option B: `hatchling`
+
+`hatchling` is a mature, general-purpose backend. Here you list the package directory explicitly:
+
+```toml
+[project]
+name = "myproject"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["pandas"]
+
+[dependency-groups]
+dev = ["ipykernel"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/myproject"]
+```
+
+## Which one should I pick?
+
+| Aspect                     | `uv_build`                         | `hatchling`                        |
+|----------------------------|------------------------------------|------------------------------------|
+| Configuration needed       | None if names follow convention    | Explicit `packages` list           |
+| Speed                      | Very fast (bundled in `uv`)        | Fast                               |
+| Dynamic version / hooks    | ✗                                  | ✓ (via plugins)                    |
+| Default for `uv init --package` | ✓                             | —                                  |
+| Best for                   | Pure-Python projects like this one | Projects needing build-time logic  |
+
+For a data analysis project, **`uv_build` is the simplest choice**.
+
+# Step 3: Sync and Prepare the Kernel
+
+```zsh
+uv add --dev ipykernel   # skip if already in [dependency-groups]
+uv sync
+```
+
+With a `[build-system]` present, `uv sync` installs your project into `.venv` in **editable** mode. Instead of copying your code, it places a small `.pth` file that points Python at `src/`:
+
+```
+.venv/lib/python3.x/site-packages/
+└── _myproject.pth  ──points to──►  ./src   (so "import myproject" resolves)
+```
+
+This means edits to `src/myproject/*.py` are visible without reinstalling.
+
+Verify the install from the terminal:
+
+```zsh
+uv run python -c "import myproject; print(myproject.__file__)"
+# → /path/to/project/src/myproject/__init__.py
+```
+
+If the printed path points into `src/`, the editable install works.
+
+## Select the kernel in VS Code
+
+1. Open a notebook in `notebooks/`.
+2. Click **Select Kernel** (top-right corner).
+3. Choose **Python Environments** → the interpreter inside `.venv`.
+
+# Step 4: The First Notebook Cell
+
+```python
+%load_ext autoreload
+%autoreload 2
+
+from myproject import simplehelper
+from myproject.somepkg import something
+```
+
+::: {.callout-note}
+## Why `autoreload` matters
+
+Editable mode makes Python *find* your updated files, but a running kernel **caches** modules it has already imported. Without `autoreload`, edits to `simplehelper.py` are ignored until you restart the kernel.
+
+```
+Without autoreload                     With %autoreload 2
+──────────────────                     ──────────────────
+edit simplehelper.py                   edit simplehelper.py
+        │                                      │
+        ▼                                      ▼
+kernel uses cached old module ✗        module reloaded before each cell ✓
+        │
+        ▼
+restart kernel to see changes
+```
+:::
+
+# Alternative: The `sys.path` Hack (Not Recommended Long-Term)
+
+If you don't want packaging yet, you can patch the import path in the first cell:
+
+```python
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path.cwd().parent / "src"))  # notebooks/ → project root → src
+import simplehelper
+```
+
+| Concern                                  | `sys.path` hack | Editable install |
+|------------------------------------------|:---------------:|:----------------:|
+| Depends on notebook's working directory  | ✗ Yes           | ✓ No             |
+| Survives moving notebooks to subfolders  | ✗               | ✓                |
+| Linters / type checkers understand it    | ✗               | ✓                |
+| Works in `pytest` and scripts            | ✗ (needs repeat)| ✓                |
+| Setup cost                               | 3 lines/notebook| ~5 lines of TOML once |
+
+The packaging approach costs a few lines of TOML once and then works everywhere.
+
+# Troubleshooting
+
+| Symptom                                                  | Likely cause                                   | Fix                                                        |
+|----------------------------------------------------------|------------------------------------------------|------------------------------------------------------------|
+| `ModuleNotFoundError: No module named 'myproject'`       | No `[build-system]` table, or not re-synced    | Add `[build-system]`, then run `uv sync`                   |
+| Same error, but terminal import works                    | Notebook kernel is not `.venv`                 | Re-select the `.venv` kernel                               |
+| `uv sync` errors about a missing module / `__init__.py`  | Folder name ≠ normalized project name          | Rename folder, or set `module-name` (`uv_build`)           |
+| Edits to `.py` files are not picked up                   | Module cached in running kernel                | Add `%autoreload 2`, or restart the kernel                 |
+| `import src.simplehelper` still works somewhere          | Leftover `src/__init__.py`                     | Delete it; `src/` should not be a package                  |
+
+# Summary
+
+```
+1. Layout      src/myproject/__init__.py      (src/ itself has no __init__.py)
+2. Build       [build-system] uv_build         (or hatchling + packages list)
+3. Install     uv add --dev ipykernel && uv sync
+4. Kernel      select .venv in VS Code
+5. Notebook    %load_ext autoreload
+               %autoreload 2
+               from myproject import simplehelper
+```

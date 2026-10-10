@@ -25,6 +25,8 @@ book:
           href: "contents/tests/pytests-basic.qmd"
     - part: Packages
       chapters: 
+        - text: Notebook Import Layout
+          href: "contents/packages/uv-notebook-imports-guide.qmd"
         - text: "__main__.py"
           href: "contents/packages/__main__.qmd"
     - part: CLI
